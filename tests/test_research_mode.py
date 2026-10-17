@@ -258,3 +258,43 @@ async def test_scout_ai_team_is_grounded_in_page_text(state, monkeypatch):
     members = await scout._ai_team_from_site("acme.com", "Acme Dental")
     assert [(m["first_name"], m["last_name"], m["title"]) for m in members] == [("Jane", "Smith", "Owner")]
     assert members[0]["published_email"] == "jane@acme.com"
+
+
+@pytest.mark.asyncio
+async def test_directory_strategy_rotates_mappable_queries(state, monkeypatch):
+    from harvey.agents.scout import Scout
+    import harvey.pipeline as D
+
+    class Cfg:
+        class icp:
+            industries = ["Med Spa", "Dentist", "Veterinarian"]  # Med Spa has no OSM mapping
+            geography = ["Spokane, WA", "Denver, CO"]
+            geo_coordinates = {"Spokane, WA": "47.6,-117.4,40", "Denver, CO": "39.7,-104.9,50"}
+            web_discovery = False
+            titles = ["Owner"]
+        class product:
+            name = "p"
+        class channels:
+            class linkedin:
+                enabled = False
+
+    seen = []
+
+    class Report:
+        errors = []
+        def summary_line(self):
+            return "stub"
+
+    async def fake_run(state_, cfg, provider, queries, **kw):
+        seen.append((provider, queries[0].term, queries[0].location, kw.get("max_spend")))
+        return Report()
+
+    monkeypatch.setattr(D, "run_prospecting", fake_run)
+    scout = Scout(_StubBrain(), state, Cfg(), env=None)
+    for _ in range(4):
+        await scout._prospect_via_directory()
+    # 2 mappable industries x 2 metros, rotating; never the unmappable one; free only
+    assert [(t, l) for _, t, l, _ in seen] == [
+        ("Dentist", "Spokane, WA"), ("Dentist", "Denver, CO"),
+        ("Veterinarian", "Spokane, WA"), ("Veterinarian", "Denver, CO")]
+    assert all(p == "osm" and spend == 0.0 for p, _, _, spend in seen)

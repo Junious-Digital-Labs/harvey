@@ -508,8 +508,6 @@ class OpenStreetMap(DiscoveryProvider):
         "insurance": ['office=insurance'],
         "medical": ['amenity=doctors', 'amenity=clinic'],
         "doctor": ['amenity=doctors', 'amenity=clinic'],
-        "med spa": ['shop=beauty'],
-        "medspa": ['shop=beauty'],
         "restaurant": ['amenity=restaurant'],
     }
 

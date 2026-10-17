@@ -145,12 +145,16 @@ class Scout:
             strategies.append(("linkedin", self._prospect_via_linkedin))
         # Job boards first: hiring is the strongest intent signal, and the
         # strategy self-skips when python-jobspy isn't installed.
-        strategies.append(("hiring_boards", self._prospect_via_hiring_boards))
+        if getattr(self.config.icp, "web_discovery", True):
+            strategies.append(("hiring_boards", self._prospect_via_hiring_boards))
+        else:
+            strategies.append(("directory", self._prospect_via_directory))
         # Searches for linkedin.com/in profiles; belongs to the LinkedIn channel,
         # so it stays off when that channel is disabled.
         if self.config.channels.linkedin.enabled:
             strategies.append(("profile_search", self._prospect_via_profile_search))
-        strategies.append(("company_discovery", self._prospect_via_company_discovery))
+        if getattr(self.config.icp, "web_discovery", True):
+            strategies.append(("company_discovery", self._prospect_via_company_discovery))
 
         for name, strategy in strategies:
             try:
@@ -633,6 +637,53 @@ class Scout:
                     return count
 
         return count
+
+    # ── Strategy: local directory (OpenStreetMap), one query per cycle ──
+
+    # Only top up the company pool when the backlog of unchecked companies is
+    # small, so Overpass (free volunteer infrastructure) sees one modest query
+    # per heartbeat at most.
+    DIRECTORY_BACKLOG_LOW = 5
+
+    async def _prospect_via_directory(self) -> int:
+        """Add the next (industry x metro) slice of local businesses.
+
+        Returns 0 by design: it adds *companies*; the known-company backfill
+        on the next cycle turns them into named prospects.
+        """
+        from harvey.collectors.discover import OpenStreetMap, build_queries
+        from harvey.pipeline import run_prospecting
+
+        try:
+            backlog = await self.state.companies_needing_prospects(
+                limit=self.DIRECTORY_BACKLOG_LOW + 1)
+        except Exception:
+            backlog = []
+        if len(backlog) > self.DIRECTORY_BACKLOG_LOW:
+            return 0
+
+        osm = OpenStreetMap()
+        queries = [q for q in build_queries(self.config, limit=40)
+                   if q.coordinate and osm._tags(q.term)]
+        if not queries:
+            logger.info("Scout: directory discovery has no mappable industry x metro.")
+            return 0
+
+        try:
+            cursor = int(await self.state.get_setting("directory_cursor", "0") or 0)
+        except ValueError:
+            cursor = 0
+        query = queries[cursor % len(queries)]
+        await self.state.set_setting("directory_cursor", str(cursor + 1))
+
+        logger.info(f"Scout: directory discovery: {query.term} in {query.location}")
+        report = await run_prospecting(
+            self.state, self.config, "osm", [query],
+            max_spend=0.0, profile=True, profile_limit=25,
+        )
+        logger.info(f"Scout: directory discovery done: {report.summary_line()}"
+                    + (f" (errors: {report.errors[0][:120]})" if report.errors else ""))
+        return 0
 
     # ── Strategy 1: LinkedIn ──
 

@@ -66,6 +66,11 @@ class ICPConfig(BaseModel):
     #   "Denver, CO": "39.7392,-104.9903,50"
     # Without one, listings providers can only match on the business name.
     geo_coordinates: dict[str, str] = {}
+    # Generic web search for companies (search-engine results + job boards)
+    # surfaces businesses anywhere. Local-service ICPs set this false and
+    # discover through the OpenStreetMap directory (industries x geo_coordinates)
+    # instead, one query per heartbeat.
+    web_discovery: bool = True
 
 
 class EmailChannelConfig(BaseModel):
