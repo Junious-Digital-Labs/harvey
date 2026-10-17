@@ -641,6 +641,12 @@ async def test_osm_maps_the_trades_it_does_know():
     assert provider._tags("Emergency plumber") == ["craft=plumber"]
     assert provider._tags("cosmetic dentist") == ["amenity=dentist"]
     assert provider._tags("B2B SaaS") == []
+    assert provider._tags("Dental Practice") == ["amenity=dentist"]
+    assert provider._tags("Veterinarian") == ["amenity=veterinary"]
+    assert provider._tags("Accounting Firm") == ["office=accountant"]
+    assert provider._tags("Medical Practice") == ["amenity=doctors", "amenity=clinic"]
+    # "resident" must not read as "dent": earlier needles win and none match.
+    assert provider._tags("Resident services") == []
 
 
 @pytest.mark.asyncio
