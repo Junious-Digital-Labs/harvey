@@ -140,3 +140,121 @@ async def test_add_draft_replaces_same_step(state):
     await state.add_draft(pid, "two", "second")
     d = await state.get_draft(pid, 1)
     assert d["subject"] == "two"
+
+
+# ── Research mode: guessed addresses are drafted for; scout reads the site ──
+
+
+class _StubBrain:
+    def __init__(self, scout_people=None):
+        self.scout_people = scout_people or []
+        self.calls = []
+
+    def load_skills_for_agent(self, name):
+        return ""
+
+    def load_prompt(self, name, **kw):
+        return ""
+
+    async def think_json(self, prompt, session_id=None, agent="", task=""):
+        self.calls.append(task)
+        if task == "write_sequence":
+            return [
+                {"step": 1, "subject": "s1 {{first_name}}", "body": "b1 {{company}}", "delay_days": 0},
+                {"step": 2, "subject": "s2 {{first_name}}", "body": "b2 {{company}}", "delay_days": 3},
+            ]
+        if task == "personal_email":
+            return {"subject": "your front desk", "body": "Saw your site. Quick question?"}
+        if task == "site_team":
+            return self.scout_people
+        return None
+
+
+class _WriterCfg:
+    class channels:
+        class email:
+            enabled = False
+            provider = "instantly"
+
+    class product:
+        name = "p"
+        description = "d"
+        key_benefits = ["b"]
+        pricing = "x"
+
+    class persona:
+        name = "Juni"
+        company = "JDL"
+        role = "BD"
+        tone = "plain"
+
+
+@pytest.mark.asyncio
+async def test_count_writable_includes_guess_only_when_asked(state):
+    await state.add_prospect(Prospect(first_name="A", last_name="B", title="Owner",
+                                      email="a@x.com", email_status="guess"))
+    assert await state.count_writable_prospects() == 0
+    assert await state.count_writable_prospects(include_guess=True) == 1
+    s = await state.get_state_summary(draft_unverified=True)
+    assert s["writable_prospects"] == 1
+
+
+@pytest.mark.asyncio
+async def test_writer_drafts_guess_in_research_mode_and_stores_in_drafts_table(state):
+    from harvey.agents.writer import Writer
+
+    pid = await state.add_prospect(Prospect(
+        first_name="Ann", last_name="Lee", title="Owner", email="ann@acme.com",
+        email_status="guess", company="Acme", industry="Dentist"))
+    junk = await state.add_prospect(Prospect(
+        first_name="Bad", last_name="Addr", title="Owner", email="bad@acme.com",
+        email_status="invalid", company="Acme", industry="Dentist"))
+    w = Writer(_StubBrain(), state, _WriterCfg(), env=None)
+    await w.run()
+
+    d = await state.get_draft(pid, 1)
+    assert d and d["subject"] == "your front desk"
+    assert await state.get_draft(junk, 1) is None
+    import aiosqlite
+    async with aiosqlite.connect(state.db_path) as db:
+        async with db.execute("SELECT COUNT(*) FROM outbox") as cur:
+            assert (await cur.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_scout_ai_team_is_grounded_in_page_text(state, monkeypatch):
+    from harvey.agents.scout import Scout
+
+    class Resp:
+        text = ("<html><body><p>" + "Welcome to Acme Dental. " * 20 +
+                "Dr. Jane Smith founded the practice. Reach us at jane@acme.com. "
+                "Front desk run by Sam Cole.</p></body></html>")
+
+    class Cfg:
+        class icp:
+            titles = ["Owner", "Office Manager"]
+            industries = ["Dentist"]
+        class channels:
+            class linkedin:
+                enabled = False
+
+    people = [
+        {"first_name": "Jane", "last_name": "Smith", "role": "owner",
+         "title_on_site": "Founder", "email": "jane@acme.com"},
+        {"first_name": "Sam", "last_name": "Cole", "role": "other", "email": ""},
+        {"first_name": "Made", "last_name": "Up", "role": "owner", "email": ""},
+    ]
+    scout = Scout(_StubBrain(people), state, Cfg(), env=None)
+
+    async def fake_base(domain, retries=1):
+        return "https://acme.com", None
+
+    async def fake_fetch(url, **kw):
+        return Resp() if url.endswith("/about") else None
+
+    monkeypatch.setattr(scout, "_resolve_base_url", fake_base)
+    monkeypatch.setattr(scout, "_fetch", fake_fetch)
+
+    members = await scout._ai_team_from_site("acme.com", "Acme Dental")
+    assert [(m["first_name"], m["last_name"], m["title"]) for m in members] == [("Jane", "Smith", "Owner")]
+    assert members[0]["published_email"] == "jane@acme.com"

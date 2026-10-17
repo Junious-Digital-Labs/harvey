@@ -61,6 +61,11 @@ class Writer:
         # invalid addresses are skipped so we don't spend Claude calls (or
         # sending reputation) on mail that will bounce.
         deliverable = {"verified", "risky"}
+        if not self.config.channels.email.enabled:
+            # Research mode: nothing is sent from here. A pattern-guessed
+            # address still gets a draft; the system that actually mails
+            # (separate, guarded) verifies it first and drops the undeliverable.
+            deliverable.add("guess")
         prospects_with_email = [
             p for p in new_prospects
             if p.email and (p.email_status or "guess") in deliverable

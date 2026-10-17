@@ -146,7 +146,10 @@ class Scout:
         # Job boards first: hiring is the strongest intent signal, and the
         # strategy self-skips when python-jobspy isn't installed.
         strategies.append(("hiring_boards", self._prospect_via_hiring_boards))
-        strategies.append(("profile_search", self._prospect_via_profile_search))
+        # Searches for linkedin.com/in profiles; belongs to the LinkedIn channel,
+        # so it stays off when that channel is disabled.
+        if self.config.channels.linkedin.enabled:
+            strategies.append(("profile_search", self._prospect_via_profile_search))
         strategies.append(("company_discovery", self._prospect_via_company_discovery))
 
         for name, strategy in strategies:
@@ -1392,6 +1395,97 @@ Respond ONLY with the JSON array."""
             unique.append(m)
         return unique
 
+    # ICP-style label for each role the brain may report.
+    _AI_ROLE_TITLES = {
+        "owner": "Owner",
+        "office_manager": "Office Manager",
+        "practice_manager": "Practice Manager",
+        "operations_manager": "Operations Manager",
+    }
+
+    async def _ai_team_from_site(self, domain: str, company_name: str) -> list[dict]:
+        """Read a small business site's own pages and name its decision makers.
+
+        Python fetches the pages; the brain only reads text Python already
+        found. Every returned name must literally appear in that text, so the
+        model cannot invent a person.
+        """
+        if self.brain is None:
+            return []
+        base, _ = await self._resolve_base_url(domain)
+        if not base:
+            return []
+
+        texts: list[str] = []
+        for path in ("", "/about", "/about-us", "/our-team", "/meet-the-team",
+                     "/team", "/staff", "/our-doctors", "/meet-the-doctor",
+                     "/contact", "/contact-us"):
+            resp = await self._fetch(f"{base}{path}", timeout=SCRAPE_TIMEOUT, retries=1)
+            if resp is None:
+                continue
+            soup = self._safe_soup(resp.text)
+            if soup is None:
+                continue
+            for tag in soup(["script", "style", "noscript", "svg"]):
+                tag.decompose()
+            text = re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+            if len(text) > 200:
+                texts.append(f"[{path or '/'}] {text[:3500]}")
+            if len(texts) >= 3:
+                break
+        if not texts:
+            return []
+        corpus = "\n".join(texts)
+
+        prompt = f"""You are reading the public website text of a small business: {company_name} ({domain}).
+Find the people who run it or manage its office. Use ONLY names that appear in the text below.
+
+For each person return role as exactly one of:
+  owner (owner, founder, principal, managing partner, or the practicing doctor/attorney/dentist/vet who clearly runs the practice),
+  office_manager, practice_manager, operations_manager, other.
+Return an email only if that exact address is written in the text.
+
+Return ONLY a JSON array (empty if nobody is named):
+[{{"first_name": "...", "last_name": "...", "role": "owner", "title_on_site": "...", "email": ""}}]
+
+TEXT:
+{corpus}"""
+        result = await self.brain.think_json(
+            prompt, session_id="harvey-scout-site",
+            agent="scout", task="site_team",
+        )
+        if isinstance(result, dict):
+            result = result.get("people") or result.get("contacts") or []
+        if not isinstance(result, list):
+            return []
+
+        low = corpus.lower()
+        members: list[dict] = []
+        for item in result[:6]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            label = self._AI_ROLE_TITLES.get(role)
+            if not label:
+                continue
+            first = re.sub(r"[^A-Za-z.'\- ]", "", str(item.get("first_name") or "")).strip()
+            last = re.sub(r"[^A-Za-z.'\- ]", "", str(item.get("last_name") or "")).strip()
+            if not first or not last:
+                continue
+            if first.lower() not in low or last.lower() not in low:
+                continue  # not grounded in the page text: drop it
+            email = str(item.get("email") or "").strip().lower()
+            if email and email not in low:
+                email = ""
+            members.append({
+                "first_name": first,
+                "last_name": last,
+                "title": label,
+                "title_on_site": str(item.get("title_on_site") or "")[:120],
+                "published_email": email,
+            })
+        return members
+
     async def _contacts_from_company(
         self,
         company_id: str,
@@ -1408,6 +1502,16 @@ Respond ONLY with the JSON array."""
             logger.debug(f"Team scrape failed for {domain}: {e}")
             return []
 
+        # Small local practices rarely have a "team" page in a scrapable shape:
+        # the owner is "Dr. Jane Smith" on /about. When the structured scrape
+        # finds nobody the ICP wants, let the brain read the site's own words.
+        if not any(self._title_matches_icp(m.get("title", "")) for m in team_members):
+            try:
+                team_members = team_members + await self._ai_team_from_site(
+                    domain, company_name)
+            except Exception as e:
+                logger.debug(f"AI team extraction failed for {domain}: {e}")
+
         contacts: list[Prospect] = []
         for member in team_members:
             title = member.get("title", "")
@@ -1422,6 +1526,13 @@ Respond ONLY with the JSON array."""
             email, email_status = await self._resolve_email(
                 first_name, last_name, domain
             )
+            published = member.get("published_email", "")
+            if published and published.endswith("@" + domain.removeprefix("www.")):
+                # Written on their own site: real, but not verified deliverable.
+                email, email_status = published, "guess"
+            notes = signal_note
+            if member.get("title_on_site"):
+                notes = (notes + " " if notes else "") + f"On their site: {member['title_on_site']}."
 
             prospect = Prospect(
                 first_name=first_name,
@@ -1436,7 +1547,7 @@ Respond ONLY with the JSON array."""
                 industry=industry,
                 source=source,
                 source_url=f"https://{domain}",
-                personalization_notes=signal_note,
+                personalization_notes=notes,
             )
 
             if not prospect.is_valid():

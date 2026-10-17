@@ -1857,23 +1857,26 @@ class StateManager:
                 row = await cursor.fetchone()
                 return dict(row) if row else None
 
-    async def count_writable_prospects(self) -> int:
+    async def count_writable_prospects(self, include_guess: bool = False) -> int:
         """New prospects the Writer can actually draft for (deliverable email).
 
         The heartbeat uses this instead of the raw 'new' count so a pool of
         guessed/invalid addresses can't pin it on write_campaign forever.
+        ``include_guess`` is for research mode (email off): a pattern-guessed
+        address is drafted for too, and the downstream system verifies it.
         """
+        statuses = "('verified', 'risky', 'guess')" if include_guess else "('verified', 'risky')"
         async with self._connect() as db:
             async with db.execute(
-                """SELECT COUNT(*) FROM prospects
+                f"""SELECT COUNT(*) FROM prospects
                    WHERE status = 'new' AND email != ''
-                     AND email_status IN ('verified', 'risky')"""
+                     AND email_status IN {statuses}"""
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
     # ── Summary for Decision Making ──
 
-    async def get_state_summary(self) -> dict:
+    async def get_state_summary(self, draft_unverified: bool = False) -> dict:
         prospect_counts = await self.count_prospects_by_status()
         today = date.today().isoformat()
         async with self._connect() as db:
@@ -1910,6 +1913,6 @@ class StateManager:
             # these every cycle — it is free, so it never competes with the
             # Claude budget the rest of the loop is rationing.
             "unprofiled": await self.count_companies_needing_profile(),
-            "writable_prospects": await self.count_writable_prospects(),
+            "writable_prospects": await self.count_writable_prospects(draft_unverified),
             "exported_campaigns": exported_campaigns,
         }

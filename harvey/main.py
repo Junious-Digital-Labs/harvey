@@ -259,7 +259,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
             # 4. Decide what to do
             logger.info("Checking pipeline state...")
-            summary = await state.get_state_summary()
+            # Research mode (email off): also draft for pattern-guessed
+            # addresses; the downstream system verifies before anything moves.
+            summary = await state.get_state_summary(
+                draft_unverified=not config.channels.email.enabled)
             action = await decide_next_action(brain, state, config, summary=summary)
 
             # 5. Execute — run independent agents in parallel where possible
