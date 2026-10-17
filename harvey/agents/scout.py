@@ -1582,7 +1582,7 @@ TEXT:
                 # Written on their own site: real, but not verified deliverable.
                 email, email_status = published, "guess"
             notes = signal_note
-            if member.get("title_on_site"):
+            if len(member.get("title_on_site", "")) >= 5:
                 notes = (notes + " " if notes else "") + f"On their site: {member['title_on_site']}."
 
             prospect = Prospect(
