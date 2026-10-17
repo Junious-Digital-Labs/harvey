@@ -413,6 +413,23 @@ MIGRATIONS: list[str] = [
     -- so one subscription's budget never consumes the other's.
     ALTER TABLE usage_log ADD COLUMN codex_calls INTEGER DEFAULT 0;
     """,
+    # ── v12: exported drafts (research-and-draft mode, email channel off) ──
+    """
+    -- One personalized first-touch draft per prospect, written when the email
+    -- channel is disabled. Never sent by Harvey: a human or a separate,
+    -- guarded sequencer reads these through `harvey export-leads`.
+    CREATE TABLE IF NOT EXISTS drafts (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL,
+        campaign_id TEXT DEFAULT '',
+        step INTEGER DEFAULT 1,
+        subject TEXT DEFAULT '',
+        body TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_prospect_step
+        ON drafts(prospect_id, step);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1805,6 +1822,55 @@ class StateManager:
                     totals[label] = self._usage_row_to_dict(row) if row else {}
         return totals
 
+    # ── Exported drafts (email channel off) ──
+
+    async def add_draft(
+        self, prospect_id: str, subject: str, body: str,
+        campaign_id: str = "", step: int = 1,
+    ) -> str:
+        """Store one first-touch draft. One per (prospect, step); a rewrite
+        replaces the old text. Returns the draft id."""
+        draft_id = _new_id()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO drafts (id, prospect_id, campaign_id, step,
+                                       subject, body, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(prospect_id, step) DO UPDATE SET
+                       campaign_id = excluded.campaign_id,
+                       subject = excluded.subject,
+                       body = excluded.body,
+                       created_at = excluded.created_at""",
+                (draft_id, prospect_id, campaign_id, step, subject, body,
+                 _utcnow().isoformat()),
+            )
+            await db.commit()
+        return draft_id
+
+    async def get_draft(self, prospect_id: str, step: int = 1) -> dict | None:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM drafts WHERE prospect_id = ? AND step = ?",
+                (prospect_id, step),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def count_writable_prospects(self) -> int:
+        """New prospects the Writer can actually draft for (deliverable email).
+
+        The heartbeat uses this instead of the raw 'new' count so a pool of
+        guessed/invalid addresses can't pin it on write_campaign forever.
+        """
+        async with self._connect() as db:
+            async with db.execute(
+                """SELECT COUNT(*) FROM prospects
+                   WHERE status = 'new' AND email != ''
+                     AND email_status IN ('verified', 'risky')"""
+            ) as cursor:
+                return (await cursor.fetchone())[0]
+
     # ── Summary for Decision Making ──
 
     async def get_state_summary(self) -> dict:
@@ -1814,12 +1880,14 @@ class StateManager:
             async with db.execute(
                 """SELECT
                      SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END),
-                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)
+                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END),
+                     SUM(CASE WHEN status = 'exported' THEN 1 ELSE 0 END)
                    FROM campaigns"""
             ) as cursor:
                 row = await cursor.fetchone()
                 draft_campaigns = row[0] or 0
                 active_campaigns = row[1] or 0
+                exported_campaigns = row[2] or 0
             async with db.execute(
                 "SELECT COUNT(*) FROM conversations WHERE status = 'open'"
             ) as cursor:
@@ -1842,4 +1910,6 @@ class StateManager:
             # these every cycle — it is free, so it never competes with the
             # Claude budget the rest of the loop is rationing.
             "unprofiled": await self.count_companies_needing_profile(),
+            "writable_prospects": await self.count_writable_prospects(),
+            "exported_campaigns": exported_campaigns,
         }

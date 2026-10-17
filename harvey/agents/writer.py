@@ -108,6 +108,8 @@ class Writer:
             # a per-prospect draft grounded in that company's actual facts.
             if self.is_native:
                 await self._personalize_first_emails(campaign_id, prospects)
+            elif not self.config.channels.email.enabled:
+                await self._draft_first_emails_for_export(campaign_id, prospects)
 
             await self.state.log_action(
                 action_type="write_campaign",
@@ -167,6 +169,26 @@ class Writer:
                 f"Writer: drafted {drafted} personalized first email(s) "
                 f"({'awaiting approval' if require_approval else 'approved'})."
             )
+
+    async def _draft_first_emails_for_export(self, campaign_id: str, prospects: list):
+        """Email channel off: same grounded per-prospect draft, stored in the
+        drafts table (never the outbox) for `harvey export-leads`."""
+        drafted = 0
+        for prospect in prospects:
+            try:
+                draft = await self._write_personal_email(prospect)
+            except Exception as e:
+                logger.warning(f"Writer: personal draft failed for {prospect.email}: {e}")
+                continue
+            if not draft:
+                continue
+            await self.state.add_draft(
+                prospect.id, draft["subject"], draft["body"],
+                campaign_id=campaign_id, step=1,
+            )
+            drafted += 1
+        if drafted:
+            logger.info(f"Writer: stored {drafted} personalized first draft(s) for export (not sent).")
 
     async def _write_personal_email(self, prospect) -> dict | None:
         """One grounded draft for one person. Facts in, one email out."""

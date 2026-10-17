@@ -370,6 +370,32 @@ def cmd_export(args):
     asyncio.run(_export())
 
 
+def cmd_export_leads(args):
+    """Emit prospects + company facts + signals + step-1 draft as JSON (stdout)."""
+    from harvey.state import StateManager
+    from harvey.export import collect_leads, leads_to_json
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+        email_statuses = None
+        if args.email_status:
+            email_statuses = [s.strip() for s in args.email_status.split(",") if s.strip()]
+        leads = await collect_leads(
+            state, since=args.since, email_statuses=email_statuses,
+            include_all=args.all, require_draft=args.require_draft,
+            limit=args.limit,
+        )
+        text = leads_to_json(leads)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(text)
+        else:
+            sys.stdout.write(text + "\n")
+
+    asyncio.run(_run())
+
+
 def cmd_gmail(args):
     """Gmail provider utilities (auth / test)."""
     from harvey.config import load_env
@@ -726,6 +752,23 @@ def main():
     sub.add_argument("--status", default="", help="Comma-separated pipeline statuses (e.g. new,queued)")
     sub.add_argument("--all", action="store_true", help="Export everything, no filters")
     sub.set_defaults(func=cmd_export)
+
+    # harvey export-leads
+    sub = subparsers.add_parser(
+        "export-leads",
+        help="Export prospects with company facts, signals and the first-touch draft as JSON",
+    )
+    sub.add_argument("--since", default="", help="ISO timestamp: only prospects created/updated since")
+    sub.add_argument("--format", choices=["json"], default="json", help="Output format (json)")
+    sub.add_argument("--out", default="", help="Write to a file instead of stdout")
+    sub.add_argument(
+        "--email-status", default="",
+        help="Comma-separated email statuses to include (default: verified,risky)",
+    )
+    sub.add_argument("--all", action="store_true", help="No email-status filter")
+    sub.add_argument("--require-draft", action="store_true", help="Only prospects that have a draft")
+    sub.add_argument("--limit", type=int, default=0, help="Max rows (0 = all)")
+    sub.set_defaults(func=cmd_export_leads)
 
     # harvey gmail auth|test
     sub = subparsers.add_parser("gmail", help="Gmail provider setup")

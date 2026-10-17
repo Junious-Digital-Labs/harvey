@@ -91,6 +91,10 @@ class MailProvider(ABC):
 
 def get_mail_provider(config, env) -> MailProvider | None:
     """Build the configured native provider, or None for instantly/unknown."""
+    # Email channel off = no mailbox access of any kind: nothing to send
+    # with, and nothing that can read replies.
+    if not getattr(config.channels.email, "enabled", True):
+        return None
     provider = (config.channels.email.provider or "").strip().lower()
     if provider == "gmail":
         from harvey.integrations.gmail import GmailProvider

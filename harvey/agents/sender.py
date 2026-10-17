@@ -78,7 +78,7 @@ class Sender:
     async def run(self):
         """Deploy campaigns — natively through the outbox, or via Instantly."""
         if not self.config.channels.email.enabled:
-            logger.info("Sender: Email channel disabled. Skipping.")
+            await self._export_drafts()
             return
 
         if self.is_native:
@@ -104,6 +104,34 @@ class Sender:
                 await self._deploy_campaign(campaign)
             except Exception as e:
                 logger.error(f"Sender: Failed to deploy campaign {campaign.name}: {e}")
+
+    async def _export_drafts(self):
+        """Email channel off: hand draft campaigns off instead of sending.
+
+        Marks each draft campaign 'exported' so the heartbeat stops asking for
+        send_campaign. Nothing is staged in the outbox, no provider is
+        touched, and nothing is sent; the drafts stay readable through
+        `harvey export-leads` and the dashboard.
+        """
+        drafts = await self.state.get_campaigns_by_status("draft")
+        if not drafts:
+            logger.info("Sender: Email channel disabled. No draft campaigns to export.")
+            return
+        for campaign in drafts:
+            await self.state.update_campaign(campaign.id, status="exported")
+            await self.state.log_action(
+                action_type="export_campaign",
+                agent="sender",
+                details={
+                    "campaign_id": campaign.id,
+                    "campaign_name": campaign.name,
+                    "prospect_count": len(campaign.prospect_ids),
+                },
+            )
+            logger.info(
+                f"Sender: Email channel disabled. Campaign '{campaign.name}' "
+                f"({len(campaign.prospect_ids)} prospects) marked 'exported'; nothing sent."
+            )
 
     def _validate_sequence(self, campaign) -> bool:
         """Never deploy a broken or empty sequence."""
